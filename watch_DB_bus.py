@@ -103,8 +103,10 @@ def parseProgramArgs():
       bus_list=sanitise_buslist(args.busfilter[0]).split(',')
     else:
       bus_list=[]
-    if args.alarm:
+    if args.alarm and isinstance(args.alarm,list): 
       alarm_threshold=int(args.alarm[0])
+    else:
+      alarm_threshold=60
     return (int(args.stopnum[0]),bus_list,alarm_threshold)
     
 
