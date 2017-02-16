@@ -4,7 +4,6 @@ import argparse
 import string
 
 import lxml, lxml.html
-import requests
 import re
 
 from datetime import datetime
@@ -33,10 +32,11 @@ class bcolors:
     UNDERLINE = '\033[4m'
 
 # Print as a warning
-def print_coloured_time_remaining(in_str,threshold,remaining_time):
-    if remaining_time <= threshold:
-        return bcolors.FAIL + in_str + bcolors.ENDC
-    return(in_str)
+def print_coloured_time_remaining(remaining_time,threshold,colour=None):
+    if remaining_time <= threshold and colour != None:
+        return colour + str(remaining_time) + bcolors.ENDC
+    #else return a string without highlighting
+    return(str(remaining_time))
 
 def clear_vt100_screen():
     subprocess.Popen( "cls" if platform.system() == "Windows" else "clear", shell=True)
@@ -47,50 +47,64 @@ def string_hour_min_to_tuple(instr):
     return int(hour_str),int(min_str)
 
 
+# Calculate the number of minutes between a start time and end time
+# Inputs are in 'hour:min' format. 
+# Assume that if the end_time hour is less than start hour, then it refers to the next day
+#
 def time_delta(start_time,end_time):
     (start_time_hour,start_time_min)=string_hour_min_to_tuple(start_time)
     (end_time_hour,end_time_min)=string_hour_min_to_tuple(end_time)
-
-#    (start_time_hour,start_time_min)=(int(start_time_hour),int(start_time_min))
-#    (end_time_hour,end_time_min)=(int(end_time_hour),int(end_time_min))
-
-# e.g 00:08 < 23:16
+    # e.g 00:08 < 23:16 (end time is next day)
     if (end_time_hour < start_time_hour):
        end_time_hour=end_time_hour+24
     delta=((end_time_hour*60)+end_time_min) - ((start_time_hour*60)+start_time_min)
     return(delta)
 
 
-def parseBusStop(stopnum,busfilter_list=[],alarm_threshold=60):
-    
-    pageurl = 'http://www.dublinbus.ie/en/RTPI/Sources-of-Real-Time-Information/?searchtype=view&searchquery='+str(stopnum)
-
-    htmltree = lxml.html.parse(pageurl)
-    mylist = [ re.sub(pattern,'',listitem) for listitem in htmltree.xpath('/html/body//*/table[@id="rtpi-results"]/tr/td/text()') ]
-    mylist = [ x for x in mylist if x != '']
-
-    chunks=[mylist[x:x+3] for x in xrange(0,len(mylist),3)]
-
-    time_now_str = datetime.now().strftime(scrapetimeformat)
-
-    for chunkbit in chunks:
-        if len(chunkbit) == 3:
-            bus=chunkbit[0]   
-            bus_time=chunkbit[2]
-            if bus in busfilter_list or not (busfilter_list):
-                if bus_time.lower() == 'due':
-                   bus_time=time_now_str
-#                   if int(bus_time.split(':')[0]) < int(time_now_str.split(':')[0]):
-                bus_delta=time_delta(time_now_str,bus_time)
-#                bus_delta=datetime.strptime(bus_time, scrapetimeformat) - datetime.strptime(time_now_str,scrapetimeformat)
-                print bus + "\t" + bus_time + "\t" + print_coloured_time_remaining(str(bus_delta),alarm_threshold,bus_delta)
-        else:
-            print("Chunkbits =",len(chunkbit))
-
+#Ensure no one is trying to inject illegal characters
 def sanitise_buslist(instr):
     valid_chars=",%s%s" % (string.ascii_letters, string.digits)
     outstr=''.join(c for c in instr if c in valid_chars)
     return outstr
+
+class DBBusStop:
+      def __init__(self, stopnum, bus_filter_list, bus_alarm_threshold):
+         self.stopnum = stopnum
+         self.filter = bus_filter_list
+         self.bus_alarm_threshold = bus_alarm_threshold
+         self.filtered_results=self.__parseBusStop__(stopnum,bus_filter_list,bus_alarm_threshold)
+       
+
+# I will need to add some exceptions (especially to deal with problems in retrieving the HTML)
+      def __parseBusStop__(self,stopnum,busfilter_list=[],alarm_threshold=60):
+        pageurl = 'http://www.dublinbus.ie/en/RTPI/Sources-of-Real-Time-Information/?searchtype=view&searchquery='+str(stopnum)
+        htmltree = lxml.html.parse(pageurl)
+        # Extract the HTML data and replace extrenuous whitespace
+        mylist = [ re.sub(pattern,'',listitem) for listitem in htmltree.xpath('/html/body//*/table[@id="rtpi-results"]/tr/td/text()') ]
+        # Remove those field that are now empty strings
+        mylist = [ x for x in mylist if x != '']
+        bus_list = []
+    
+        time_now_str = datetime.now().strftime(scrapetimeformat)
+        chunks=[mylist[x:x+3] for x in xrange(0,len(mylist),3)]
+        for chunkbit in chunks:
+            if len(chunkbit) == 3:
+                bus=chunkbit[0]   
+                bus_time=chunkbit[2]
+                if bus in busfilter_list or not (busfilter_list):
+                    if bus_time.lower() == 'due':
+                       bus_time=time_now_str
+                    bus_delta=time_delta(time_now_str,bus_time)
+		    this_bus=(bus,bus_time, chunkbit[1], bus_delta) 
+                    bus_list.append(this_bus)
+        return bus_list
+
+      def printbuses(self,highlight=True):
+          print('-'*80)
+          for bus in self.filtered_results:
+            out_string=bus[0] + "\t" + bus[1] + "\t" + print_coloured_time_remaining(bus[3],self.bus_alarm_threshold,bcolors.FAIL)
+            print(out_string)
+
 
 
 def parseProgramArgs():
@@ -103,6 +117,8 @@ def parseProgramArgs():
       bus_list=sanitise_buslist(args.busfilter[0]).split(',')
     else:
       bus_list=[]
+    if args.alarm and isinstance(args.alarm,int): 
+      print(args.alarm, str(args.alarm))
     if args.alarm and isinstance(args.alarm,list): 
       alarm_threshold=int(args.alarm[0])
     else:
@@ -115,7 +131,9 @@ if __name__ == '__main__':
     myStopNum=parseProgramArgs()
     while True:
         clear_vt100_screen()
-        parseBusStop(myStopNum[0],myStopNum[1],myStopNum[2])
+        x=DBBusStop(myStopNum[0],myStopNum[1],myStopNum[2])
+	x.printbuses()
+
         time.sleep(10)
     
     
